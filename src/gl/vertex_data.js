@@ -1,5 +1,5 @@
 import gl from './constants'; // web workers don't have access to GL context, so import all GL constants
-import {log} from '../utils/utils';
+import Utils from '../utils/utils';
 
 // Maps GL types to JS array types
 let array_types = {
@@ -23,7 +23,7 @@ export default class VertexData {
             this.buffer = VertexData.array_pool.pop();
             this.buffer_length = this.buffer.byteLength;
             this.buffer_size = Math.floor(this.buffer_length / this.vertex_layout.stride);
-            log('trace', `VertexData: reused buffer of bytes ${this.buffer_length}, ${this.buffer_size} vertices`);
+            Utils.log('trace', `VertexData: reused buffer of bytes ${this.buffer_length}, ${this.buffer_size} vertices`);
         }
         else {
             this.buffer_size = prealloc || 500; // # of vertices to allocate
@@ -71,7 +71,7 @@ export default class VertexData {
             this.buffer = new_view;
             this.setBufferViews();
             this.realloc_count++;
-            // log.info(`VertexData: expanded vertex block to ${this.buffer_size} vertices`);
+            // Utils.log('info', `VertexData: expanded vertex block to ${this.buffer_size} vertices`);
         }
     }
 
@@ -97,7 +97,7 @@ export default class VertexData {
     end () {
         // Clip the buffer to size used for this VBO
         this.buffer = this.buffer.subarray(0, this.buffer_offset);
-        log('trace', `VertexData: ${this.buffer_size} vertices total, realloc count ${this.realloc_count}`);
+        Utils.log('trace', `VertexData: ${this.buffer_size} vertices total, realloc count ${this.realloc_count}`);
         return this;
     }
 

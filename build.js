@@ -5,14 +5,14 @@ var browserify = require('browserify'),
     yargs      = require('yargs'),
     glob       = require('glob'),
     babelify   = require("babelify"),
-    babel   = require("babel");
+    babel   = require("babel-core");
 
 var args = yargs.usage('Usage: $0 --debug --require --all').demand([]).argv;
 
 
 function main() {
 
-    var bundle = browserify({ debug: true});
+    var bundle = browserify({ debug: (args.debug !== undefined) });
 
     // Use either Babel polyfill or runtime
     if (args.polyfill) {
@@ -20,9 +20,11 @@ function main() {
         bundle.transform(babelify);
     }
     else if (args.runtime) {
-        bundle.transform(babelify.configure({
-            optional: ['runtime']
-        }));
+        bundle.transform("babelify", {
+            presets: ["es2015"],
+            plugins: ["transform-runtime"],
+            sourceMaps: (args.debug !== undefined)
+        });
     }
 
     if ((args.require !== undefined) && (args.all !== undefined)) {
@@ -30,7 +32,7 @@ function main() {
     }
 
     if (args.require !== undefined) {
-        bundle.require(require.resolve(args.require), { entry: true});
+        bundle.require(require.resolve(args.require), { entry: true });
     }
 
     if (args.all !== undefined) {

@@ -384,13 +384,13 @@ export default class ShaderProgram {
         }
 
         this.uniforms[name] = this.uniforms[name] || {};
-        let uniform = this.uniforms[name];
-        uniform.name = name;
-        if (uniform.location === undefined) {
-            uniform.location = this.gl.getUniformLocation(this.program, name);
+        let uni = this.uniforms[name];
+        uni.name = name;
+        if (uni.location === undefined) {
+            uni.location = this.gl.getUniformLocation(this.program, name);
         }
-        uniform.method = 'uniform' + method;
-        uniform.value = value;
+        uni.method = 'uniform' + method;
+        uni.value = value;
         this.updateUniform(name);
     }
 
@@ -490,13 +490,13 @@ export default class ShaderProgram {
     // compilation path.
     block(type, num) {
         let lines = this.lines(type);
-        let block;
+        let block_def;
         for (let i=0; i < num && i < lines.length; i++) {
             let line = lines[i];
             let match = line.match(/\/\/ tangram-block-start: ([A-Za-z0-9_-]+), ([A-Za-z0-9_-]+), (\d+)/);
             if (match && match.length > 1) {
                 // mark current block
-                block = {
+                block_def = {
                     scope: match[1],
                     name: match[2],
                     num: match[3]
@@ -505,18 +505,18 @@ export default class ShaderProgram {
             else {
                 match = line.match(/\/\/ tangram-block-end: ([A-Za-z0-9_-]+), ([A-Za-z0-9_-]+), (\d+)/);
                 if (match && match.length > 1) {
-                    block = null; // clear current block
+                    block_def = null; // clear current block
                 }
             }
 
             // update line # and content
-            if (block) {
+            if (block_def) {
                 // init to -1 so that line 0 is first actual line of block code, after comment marker
-                block.line = (block.line == null) ? -1 : block.line + 1;
-                block.source = line;
+                block_def.line = (block_def.line == null) ? -1 : block_def.line + 1;
+                block_def.source = line;
             }
         }
-        return block;
+        return block_def;
     }
 
     // Returns list of available extensions from those requested
