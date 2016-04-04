@@ -59,7 +59,14 @@ Object.assign(self, {
         config.sources = Utils.stringsToFunctions(config.sources); // parse new sources
         self.sources.tiles = {}; // clear previous sources
         for (let name in config.sources) {
-            let source = DataSource.create(Object.assign({}, config.sources[name], {name}));
+            let source;
+            try {
+                source = DataSource.create(Object.assign({}, config.sources[name], {name}), self.sources.tiles);
+            }
+            catch(e) {
+                continue;
+            }
+
             if (!source) {
                 continue;
             }
@@ -91,11 +98,10 @@ Object.assign(self, {
 
         // Expand styles
         config = Utils.stringsToFunctions(config, StyleParser.wrapFunction);
-        self.styles = StyleManager.build(config.styles, { generation: self.generation });
+        self.styles = StyleManager.build(config.styles, { generation: self.generation, sources: self.sources.tiles });
 
         // Parse each top-level layer as a separate rule tree
-        self.layers = config.layers;
-        self.rules = parseRules(self.layers);
+        self.rules = parseRules(config.layers);
 
         // Sync tetxure info from main thread
         self.syncing_textures = self.syncTextures(config.textures);
@@ -114,15 +120,15 @@ Object.assign(self, {
     // Build a tile: load from tile source if building for first time, otherwise rebuild with existing data
     buildTile ({ tile }) {
         // Tile cached?
-        if (self.tiles[tile.key] != null) {
+        if (self.getTile(tile.key) != null) {
             // Already loading?
-            if (self.tiles[tile.key].loading === true) {
+            if (self.getTile(tile.key).loading === true) {
                 return;
             }
         }
 
         // Update tile cache
-        tile = self.tiles[tile.key] = Object.assign(self.tiles[tile.key] || {}, tile);
+        tile = self.tiles[tile.key] = Object.assign(self.getTile(tile.key) || {}, tile);
 
         // Update config (styles, etc.), then build tile
         return self.awaitConfiguration().then(() => {
@@ -136,6 +142,11 @@ Object.assign(self, {
                     tile.error = null;
 
                     self.loadTileSourceData(tile).then(() => {
+                        if (!self.getTile(tile.key)) {
+                            Utils.log('trace', `stop tile build after data source load because tile was removed: ${tile.key}`);
+                            return;
+                        }
+
                         // Warn and continue on data source error
                         if (tile.source_data.error) {
                             Utils.log('warn', `tile load error(s) for ${tile.key}: ${tile.source_data.error}`);
@@ -143,8 +154,8 @@ Object.assign(self, {
 
                         tile.loading = false;
                         tile.loaded = true;
-                        Tile.buildGeometry(tile, self.layers, self.rules, self.styles).then(keys => {
-                            resolve({ tile: Tile.slice(tile, keys) });
+                        Tile.buildGeometry(tile, self.config, self.rules, self.styles).then(keys => {
+                            resolve(WorkerBroker.returnWithTransferables({ tile: Tile.slice(tile, keys) }));
                         });
                     }).catch((error) => {
                         tile.loading = false;
@@ -161,8 +172,8 @@ Object.assign(self, {
                 Utils.log('trace', `used worker cache for tile ${tile.key}`);
 
                 // Build geometry
-                return Tile.buildGeometry(tile, self.layers, self.rules, self.styles).then(keys => {
-                    return { tile: Tile.slice(tile, keys) };
+                return Tile.buildGeometry(tile, self.config, self.rules, self.styles).then(keys => {
+                    return WorkerBroker.returnWithTransferables({ tile: Tile.slice(tile, keys) });
                 });
             }
         });
@@ -170,7 +181,17 @@ Object.assign(self, {
 
     // Load this tile's data source
     loadTileSourceData (tile) {
-        return self.sources.tiles[tile.source].load(tile);
+        if (self.sources.tiles[tile.source]) {
+            return self.sources.tiles[tile.source].load(tile);
+        }
+        else {
+            tile.source_data = { error: `Data source '${tile.source}' not found` };
+            return Promise.resolve(tile);
+        }
+    },
+
+    getTile(key) {
+        return self.tiles[key];
     },
 
     // Remove tile
@@ -213,17 +234,11 @@ Object.assign(self, {
         return FeatureSelection.getMapSize();
     },
 
-    // Texture info needs to be synced from main thread
+    // Texture info needs to be synced from main thread, e.g. width/height, which we only know after the texture loads
     syncTextures (tex_config) {
-        // We're only syncing the textures that have sprites defined, since these are (currently) the only ones we
-        // need info about for geometry construction (e.g. width/height, which we only know after the texture loads)
         let textures = [];
         if (tex_config) {
-            for (let [texname, texture] of Utils.entries(tex_config)) {
-                if (texture.sprites) {
-                    textures.push(texname);
-                }
-            }
+            textures.push(...Object.keys(tex_config));
         }
 
         Utils.log('trace', 'sync textures to worker:', textures);

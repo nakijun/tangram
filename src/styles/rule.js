@@ -3,7 +3,7 @@ import mergeObjects from '../utils/merge';
 import {match} from 'match-feature';
 import log from 'loglevel';
 
-export const whiteList = ['filter', 'draw', 'visible', 'data', 'properties'];
+export const whiteList = ['filter', 'draw', 'visible', 'data'];
 
 export let ruleCache = {};
 
@@ -70,7 +70,7 @@ export function mergeTrees(matchingTrees, group) {
 
 class Rule {
 
-    constructor({name, parent, draw, visible, filter, properties}) {
+    constructor({name, parent, draw, visible, filter}) {
         this.id = Rule.id++;
         this.parent = parent;
         this.name = name;
@@ -78,16 +78,12 @@ class Rule {
         this.draw = draw;
         this.filter = filter;
         this.visible = visible !== undefined ? visible : (this.parent && this.parent.visible);
-        this.properties = properties !== undefined ? properties : (this.parent && this.parent.properties);
 
-        // Denormalize layer name & properties to draw groups
+        // Denormalize layer name to draw groups
         if (this.draw) {
             for (let group in this.draw) {
+                this.draw[group] = this.draw[group] || {};
                 this.draw[group].layer_name = this.full_name;
-
-                if (this.properties !== undefined) {
-                    this.draw[group].properties = this.properties;
-                }
             }
         }
 
@@ -111,7 +107,7 @@ class Rule {
 
         try {
             this.buildZooms();
-            this.filter = match(this.filter);
+            this.filter = this.filter && match(this.filter);
         }
         catch(e) {
             // Invalid filter
@@ -161,15 +157,15 @@ Rule.id = 0;
 
 
 export class RuleLeaf extends Rule {
-    constructor({name, parent, draw, visible, filter, properties}) {
-        super({name, parent, draw, visible, filter, properties});
+    constructor({name, parent, draw, visible, filter}) {
+        super({name, parent, draw, visible, filter});
     }
 
 }
 
 export class RuleTree extends Rule {
-    constructor({name, parent, draw, visible, rules, filter, properties}) {
-        super({name, parent, draw, visible, filter, properties});
+    constructor({name, parent, draw, visible, rules, filter}) {
+        super({name, parent, draw, visible, filter});
         this.rules = rules || [];
     }
 
@@ -188,47 +184,41 @@ export class RuleTree extends Rule {
             // Only evaluate each rule combination once (undefined means not yet evaluated,
             // null means evaluated with no draw object)
             if (ruleCache[cache_key] === undefined) {
-                // Visible?
-                if (rules.some(x => x.visible === false)) {
-                    ruleCache[cache_key] = null;
+                // Find all the unique visible draw blocks for this rule tree
+                let draw_rules = rules.map(x => x && x.visible !== false && x.calculatedDraw);
+                let draw_keys = {};
+
+                for (let r=0; r < draw_rules.length; r++) {
+                    let rule = draw_rules[r];
+                    if (!rule) {
+                        continue;
+                    }
+                    for (let g=0; g < rule.length; g++) {
+                        let group = rule[g];
+                        for (let key in group) {
+                            draw_keys[key] = true;
+                        }
+                    }
                 }
-                else {
-                    // Find all the unique draw blocks for this rule tree
-                    let draw_rules = rules.map(x => x && x.calculatedDraw);
-                    let draw_keys = {};
 
-                    for (let r=0; r < draw_rules.length; r++) {
-                        let rule = draw_rules[r];
-                        if (!rule) {
-                            continue;
-                        }
-                        for (let g=0; g < rule.length; g++) {
-                            let group = rule[g];
-                            for (let key in group) {
-                                draw_keys[key] = true;
-                            }
-                        }
+                // Calculate each draw group
+                for (let draw_key in draw_keys) {
+                    ruleCache[cache_key] = ruleCache[cache_key] || {};
+                    ruleCache[cache_key][draw_key] = mergeTrees(draw_rules, draw_key);
+
+                    // Only save the ones that weren't null
+                    if (!ruleCache[cache_key][draw_key]) {
+                        delete ruleCache[cache_key][draw_key];
                     }
-
-                    // Calculate each draw group
-                    for (let draw_key in draw_keys) {
-                        ruleCache[cache_key] = ruleCache[cache_key] || {};
-                        ruleCache[cache_key][draw_key] = mergeTrees(draw_rules, draw_key);
-
-                        // Only save the ones that weren't null
-                        if (!ruleCache[cache_key][draw_key]) {
-                            delete ruleCache[cache_key][draw_key];
-                        }
-                        else {
-                            ruleCache[cache_key][draw_key].key = cache_key + '/' + draw_key;
-                            ruleCache[cache_key][draw_key].layers = rules.map(x => x && x.full_name);
-                        }
+                    else {
+                        ruleCache[cache_key][draw_key].key = cache_key + '/' + draw_key;
+                        ruleCache[cache_key][draw_key].layers = rules.map(x => x && x.full_name);
                     }
+                }
 
-                    // No rules evaluated
-                    if (ruleCache[cache_key] && Object.keys(ruleCache[cache_key]).length === 0) {
-                        ruleCache[cache_key] = null;
-                    }
+                // No rules evaluated
+                if (ruleCache[cache_key] && Object.keys(ruleCache[cache_key]).length === 0) {
+                    ruleCache[cache_key] = null;
                 }
             }
             return ruleCache[cache_key];
@@ -369,7 +359,6 @@ export function matchFeature(context, rules, collectedRules, collectedRulesIds) 
 
     for (let r=0; r < rules.length; r++) {
         let current = rules[r];
-        context.properties = current.properties;
 
         if (current instanceof RuleLeaf) {
 
@@ -396,8 +385,6 @@ export function matchFeature(context, rules, collectedRules, collectedRulesIds) 
                 }
             }
         }
-
-        context.properties = null;
     }
 
     return matched;

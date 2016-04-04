@@ -1,7 +1,8 @@
 uniform vec2 u_resolution;
 uniform float u_time;
 uniform vec3 u_map_position;
-uniform vec3 u_tile_origin;
+uniform vec4 u_tile_origin;
+uniform float u_tile_proxy_depth;
 uniform float u_meters_per_pixel;
 uniform float u_device_pixel_ratio;
 
@@ -40,6 +41,11 @@ varying vec4 v_world_position;
     varying vec2 v_texcoord;
 #endif
 
+// Optional model position varying for tile coordinate zoom
+#ifdef TANGRAM_MODEL_POSITION_BASE_ZOOM_VARYING
+    varying vec4 v_modelpos_base_zoom;
+#endif
+
 #if defined(TANGRAM_LIGHTING_VERTEX)
     varying vec4 v_lighting;
 #endif
@@ -47,6 +53,7 @@ varying vec4 v_world_position;
 #pragma tangram: camera
 #pragma tangram: material
 #pragma tangram: lighting
+#pragma tangram: raster
 #pragma tangram: global
 
 void main() {
@@ -56,6 +63,14 @@ void main() {
     // Texture UVs
     #ifdef TANGRAM_TEXTURE_COORDS
         v_texcoord = a_texcoord;
+        #ifdef TANGRAM_EXTRUDE_LINES
+            v_texcoord.y *= TANGRAM_V_SCALE_ADJUST;
+        #endif
+    #endif
+
+    // Pass model position to fragment shader
+    #ifdef TANGRAM_MODEL_POSITION_BASE_ZOOM_VARYING
+        v_modelpos_base_zoom = modelPositionBaseZoom();
     #endif
 
     // Position
@@ -65,7 +80,7 @@ void main() {
         vec2 extrude = SCALE_8(a_extrude.xy);
         float width = SHORT(a_extrude.z);
         float dwdz = SHORT(a_extrude.w);
-        float dz = clamp(u_map_position.z - abs(u_tile_origin.z), 0.0, 1.0);
+        float dz = clamp(u_map_position.z - u_tile_origin.z, 0., 1.);
 
         // Interpolate between zoom levels
         width += dwdz * dz;
@@ -93,24 +108,22 @@ void main() {
     v_normal = normalize(u_normalMatrix * TANGRAM_NORMAL);
     v_color = a_color;
 
-    // Vertex lighting
     #if defined(TANGRAM_LIGHTING_VERTEX)
-        vec4 color = a_color;
-        vec3 normal = TANGRAM_NORMAL;
+        // Vertex lighting
+        vec3 normal = v_normal;
 
         // Modify normal before lighting
         #pragma tangram: normal
 
-        // Modify color and material properties before lighting
-        #pragma tangram: color
-
-        v_lighting = calculateLighting(position.xyz, normal, color);
-        v_color = color;
+        // Pass lighting intensity to fragment shader
+        v_lighting = calculateLighting(position.xyz - u_eye, normal, vec4(1.));
     #endif
 
     // Camera
     cameraProjection(position);
-    applyLayerOrder(SHORT(a_position.w), position);
+
+    // +1 is to keep all layers including proxies > 0
+    applyLayerOrder(SHORT(a_position.w) + u_tile_proxy_depth + 1., position);
 
     gl_Position = position;
 }

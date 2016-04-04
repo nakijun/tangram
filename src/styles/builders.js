@@ -15,7 +15,9 @@ Builders.tile_bounds = [
     { x: Geo.tile_scale, y: -Geo.tile_scale } // TODO: correct for flipped y-axis?
 ];
 
-Builders.defaultUVs = [0, 0, 1, 1]; // single allocation for default values
+const default_uvs = [0, 0, 1, 1];
+const zero_vec2 = [0, 0];
+const up_vec3 = [0, 0, 1];
 
 // Re-scale UVs from [0, 1] range to a smaller area within the image
 Builders.getTexcoordsForSprite = function (area_origin, area_size, tex_size) {
@@ -38,7 +40,7 @@ Builders.buildPolygons = function (
 
     if (texcoord_index) {
         texcoord_normalize = texcoord_normalize || 1;
-        var [min_u, min_v, max_u, max_v] = texcoord_scale || Builders.defaultUVs;
+        var [min_u, min_v, max_u, max_v] = texcoord_scale || default_uvs;
     }
 
     var num_polygons = polygons.length;
@@ -87,7 +89,8 @@ Builders.buildExtrudedPolygons = function (
         tile_edge_tolerance,
         texcoord_index,
         texcoord_scale,
-        texcoord_normalize
+        texcoord_normalize,
+        winding
     }) {
 
     // Top
@@ -100,7 +103,7 @@ Builders.buildExtrudedPolygons = function (
     // Fit UVs to wall quad
     if (texcoord_index) {
         texcoord_normalize = texcoord_normalize || 1;
-        var [min_u, min_v, max_u, max_v] = texcoord_scale || Builders.defaultUVs;
+        var [min_u, min_v, max_u, max_v] = texcoord_scale || default_uvs;
         var texcoords = [
             [min_u, max_v],
             [min_u, min_v],
@@ -120,27 +123,36 @@ Builders.buildExtrudedPolygons = function (
             var contour = polygon[q];
 
             for (var w=0; w < contour.length - 1; w++) {
-                if (remove_tile_edges && Builders.isOnTileEdge(contour[w], contour[w+1], { tolerance: tile_edge_tolerance })) {
+                if (remove_tile_edges && Builders.outsideTile(contour[w], contour[w+1], tile_edge_tolerance)) {
                     continue; // don't extrude tile edges
+                }
+
+                // Wall order is dependent on winding order, so that normals face outward
+                let w0, w1;
+                if (winding === 'CCW') {
+                    w0 = w;
+                    w1 = w+1;
+                }
+                else {
+                    w0 = w+1;
+                    w1 = w;
                 }
 
                 // Two triangles for the quad formed by each vertex pair, going from bottom to top height
                 var wall_vertices = [
                     // Triangle
-                    [contour[w+1][0], contour[w+1][1], max_z],
-                    [contour[w+1][0], contour[w+1][1], min_z],
-                    [contour[w][0], contour[w][1], min_z],
+                    [contour[w1][0], contour[w1][1], max_z],
+                    [contour[w1][0], contour[w1][1], min_z],
+                    [contour[w0][0], contour[w0][1], min_z],
                     // Triangle
-                    [contour[w][0], contour[w][1], min_z],
-                    [contour[w][0], contour[w][1], max_z],
-                    [contour[w+1][0], contour[w+1][1], max_z]
+                    [contour[w0][0], contour[w0][1], min_z],
+                    [contour[w0][0], contour[w0][1], max_z],
+                    [contour[w1][0], contour[w1][1], max_z]
                 ];
 
                 // Calc the normal of the wall from up vector and one segment of the wall triangles
-                var normal = Vector.cross(
-                    [0, 0, 1],
-                    Vector.normalize([contour[w+1][0] - contour[w][0], contour[w+1][1] - contour[w][1], 0])
-                );
+                let wall_vec = Vector.normalize([contour[w1][0] - contour[w0][0], contour[w1][1] - contour[w0][1], 0]);
+                let normal = Vector.cross(up_vec3, wall_vec);
 
                 // Update vertex template with current surface normal
                 vertex_template[normal_index + 0] = normal[0] * normal_normalize;
@@ -165,17 +177,20 @@ Builders.buildExtrudedPolygons = function (
 };
 
 // Build tessellated triangles for a polyline
-var cornersForCap = {
+const corners_for_cap = {
     butt: 0,
     square: 2,
     round: 3
 };
 
-var trianglesForJoin = {
+const triangles_for_join = {
     miter: 0,
     bevel: 1,
     round: 3
 };
+
+// Scaling factor to add precision to line texture V coordinate packed as normalized short
+const v_scale_adjust = Geo.tile_scale;
 
 Builders.buildPolylines = function (
     lines,
@@ -188,25 +203,34 @@ Builders.buildPolylines = function (
         texcoord_index,
         texcoord_scale,
         texcoord_normalize,
+        texcoord_ratio,
         scaling_index,
         scaling_normalize,
-        join, cap
+        join, cap,
+        miter_limit
     }) {
 
-    var cornersOnCap = cornersForCap[cap] || 0;         // default 'butt'
-    var trianglesOnJoin = trianglesForJoin[join] || 0;  // default 'miter'
+    var cornersOnCap = corners_for_cap[cap] || 0;         // default 'butt'
+    var trianglesOnJoin = triangles_for_join[join] || 0;  // default 'miter'
+
+    // Configure miter limit
+    if (trianglesOnJoin === 0) {
+        miter_limit = miter_limit || 3; // default miter limit
+        var miter_len_sq = miter_limit * miter_limit;
+    }
 
     // Build variables
     if (texcoord_index) {
         texcoord_normalize = texcoord_normalize || 1;
-        var [min_u, min_v, max_u, max_v] = texcoord_scale || Builders.defaultUVs;
+        texcoord_ratio = texcoord_ratio || 1;
+        var [min_u, min_v, max_u, max_v] = texcoord_scale || default_uvs;
     }
 
     // Values that are constant for each line and are passed to helper functions
-    var constants = {
+    var context = {
         vertex_data,
         vertex_template,
-        halfWidth: width/2,
+        half_width: width/2,
         vertices: [],
         scaling_index,
         scaling_normalize,
@@ -215,11 +239,18 @@ Builders.buildPolylines = function (
         texcoords: texcoord_index && [],
         texcoord_normalize,
         min_u, min_v, max_u, max_v,
-        nPairs: 0
+        v_scale: 1 / ((width * texcoord_ratio) * v_scale_adjust), // scales line texture as a ratio of the line's width
+        total_dist: 0,
+        num_pairs: 0
     };
 
     for (var ln = 0; ln < lines.length; ln++) {
-        var line = lines[ln];
+        // Remove dupe points from lines
+        var line = dedupeLine(lines[ln], closed_polygon);
+        if (!line) {
+            continue; // skip if no valid line remaining
+        }
+
         var lineSize = line.length;
 
         // Ignore non-lines
@@ -240,7 +271,7 @@ Builders.buildPolylines = function (
             isNext = true;
 
         // Add vertices to buffer according to their index
-        indexPairs(constants);
+        indexPairs(context);
 
         // Do this with the rest (except the last one)
         for (let i = 0; i < lineSize ; i++) {
@@ -257,7 +288,7 @@ Builders.buildPolylines = function (
 
                 var needToClose = true;
                 if (remove_tile_edges) {
-                    if(Builders.isOnTileEdge(line[i], line[lineSize-2], { tolerance: tile_edge_tolerance })) {
+                    if(Builders.outsideTile(line[i], line[lineSize-2], tile_edge_tolerance)) {
                         needToClose = false;
                     }
                 }
@@ -285,14 +316,17 @@ Builders.buildPolylines = function (
 
                 normNext = Vector.normalize(Vector.perp(coordCurr, coordNext));
                 if (remove_tile_edges) {
-                    if (Builders.isOnTileEdge(coordCurr, coordNext, { tolerance: tile_edge_tolerance })) {
+                    if (Builders.outsideTile(coordCurr, coordNext, tile_edge_tolerance)) {
                         normCurr = Vector.normalize(Vector.perp(coordPrev, coordCurr));
                         if (isPrev) {
-                            addVertexPair(coordCurr, normCurr, i/lineSize, constants);
-                            constants.nPairs++;
+                            addVertexPair(
+                                coordCurr, normCurr,
+                                context.texcoords && Vector.length(Vector.sub(coordCurr, coordPrev)),
+                                context);
+                            context.num_pairs++;
 
                             // Add vertices to buffer acording their index
-                            indexPairs(constants);
+                            indexPairs(context);
                         }
                         isPrev = false;
                         continue;
@@ -327,21 +361,29 @@ Builders.buildPolylines = function (
             if (isPrev || isNext) {
                 // If it's the BEGINNING of a LINE
                 if (i === 0 && !isPrev && !closed_polygon) {
-                    addCap(coordCurr, normCurr, cornersOnCap, true, constants);
+                    addCap(coordCurr, normCurr, cornersOnCap, true, context);
+                }
+
+                //  Miter limit: if miter join is too sharp, convert to bevel instead
+                if (trianglesOnJoin === 0 && Vector.lengthSq(normCurr) > miter_len_sq) {
+                    trianglesOnJoin = triangles_for_join['bevel']; // switch to bevel
                 }
 
                 // If it's a JOIN
-                if(trianglesOnJoin !== 0 && isPrev && isNext) {
+                if (trianglesOnJoin !== 0 && isPrev && isNext) {
                     addJoin([coordPrev, coordCurr, coordNext],
                             [normPrev,normCurr, normNext],
-                            i/lineSize, trianglesOnJoin,
-                            constants);
+                            trianglesOnJoin,
+                            context);
                 } else {
-                    addVertexPair(coordCurr, normCurr, i/(lineSize-1), constants);
+                    addVertexPair(
+                        coordCurr, normCurr,
+                        context.texcoords && Vector.length(Vector.sub(coordCurr, coordPrev)),
+                        context);
                 }
 
                 if (isNext) {
-                   constants.nPairs++;
+                   context.num_pairs++;
                 }
 
                 isPrev = true;
@@ -349,25 +391,50 @@ Builders.buildPolylines = function (
         }
 
         // Add vertices to buffer according to their index
-        indexPairs(constants);
+        indexPairs(context);
 
          // If it's the END of a LINE
         if(!closed_polygon) {
-            addCap(coordCurr, normCurr, cornersOnCap , false, constants);
+            addCap(coordCurr, normCurr, cornersOnCap , false, context);
         }
     }
 };
 
+// Remove duplicate points from a line, creating a new line only when points must be removed
+function dedupeLine (line, closed) {
+    let i, dupes;
+
+    // Collect dupe points
+    for (i=0; i < line.length - 1; i++) {
+        if (line[i][0] === line[i+1][0] && line[i][1] === line[i+1][1]) {
+            dupes = dupes || [];
+            dupes.push(i);
+        }
+    }
+
+    // Remove dupe points
+    if (dupes) {
+        line = line.slice(0);
+        dupes.forEach(d => line.splice(d, 1));
+    }
+
+    // Line needs at least 2 points, polygon needs at least 3 (+1 to close)
+    if (!closed && line.length < 2 || closed && line.length < 4) {
+        return;
+    }
+    return line;
+}
+
 // Add to equidistant pairs of vertices (internal method for polyline builder)
-function addVertex(coord, normal, uv, { halfWidth, vertices, scalingVecs, texcoords }) {
+function addVertex(coord, normal, uv, { half_width, vertices, scalingVecs, texcoords }) {
     if (scalingVecs) {
         //  a. If scaling is on add the vertex (the currCoord) and the scaling Vecs (normals pointing where to extrude the vertices)
         vertices.push(coord);
         scalingVecs.push(normal);
     } else {
         //  b. Add the extruded vertices
-        vertices.push([coord[0] + normal[0] * halfWidth,
-                       coord[1] + normal[1] * halfWidth]);
+        vertices.push([coord[0] + normal[0] * half_width,
+                       coord[1] + normal[1] * half_width]);
     }
 
     // c) Add UVs if they are enabled
@@ -377,14 +444,15 @@ function addVertex(coord, normal, uv, { halfWidth, vertices, scalingVecs, texcoo
 }
 
 //  Add to equidistant pairs of vertices (internal method for polyline builder)
-function addVertexPair (coord, normal, v_pct, constants) {
-    if (constants.texcoords) {
-        addVertex(coord, normal, [constants.max_u, (1-v_pct)*constants.min_v + v_pct*constants.max_v], constants);
-        addVertex(coord, Vector.neg(normal), [constants.min_u, (1-v_pct)*constants.min_v + v_pct*constants.max_v], constants);
+function addVertexPair (coord, normal, dist, context) {
+    if (context.texcoords) {
+        context.total_dist += dist * context.v_scale;
+        addVertex(coord, normal, [context.max_u, context.total_dist], context);
+        addVertex(coord, Vector.neg(normal), [context.min_u, context.total_dist], context);
     }
     else {
-        addVertex(coord, normal, null, constants);
-        addVertex(coord, Vector.neg(normal), null, constants);
+        addVertex(coord, normal, null, context);
+        addVertex(coord, Vector.neg(normal), null, context);
     }
 }
 
@@ -393,7 +461,7 @@ function addVertexPair (coord, normal, v_pct, constants) {
 //  and interpolating their UVs               \ p /
 //                                             \./
 //                                              C
-function addFan (coord, nA, nC, nB, uA, uC, uB, signed, numTriangles, constants) {
+function addFan (coord, nA, nC, nB, uA, uC, uB, signed, numTriangles, context) {
 
     if (numTriangles < 1) {
         return;
@@ -401,120 +469,242 @@ function addFan (coord, nA, nC, nB, uA, uC, uB, signed, numTriangles, constants)
 
     // Add previous vertices to buffer and clear the buffers and index pairs
     // because we are going to add more triangles.
-    indexPairs(constants);
+    indexPairs(context);
 
+    // Initial parameters
     var normCurr = Vector.set(nA);
     var normPrev = [0,0];
 
-    var angle_delta = Vector.dot(nA, nB);
-    if (angle_delta < -1) {
-        angle_delta = -1;
-    }
-    angle_delta = Math.acos(angle_delta)/numTriangles;
+    // Calculate the angle between A and B
+    var angle_delta = Vector.angleBetween(nA, nB);
 
+    // Calculate the angle for each triangle
+    var angle_step = angle_delta/numTriangles;
+
+    // Joins that turn left or right behave diferently...
+    // triangles need to be rotated in diferent directions
     if (!signed) {
-        angle_delta *= -1;
+        angle_step *= -1;
     }
 
-    if (constants.texcoords) {
+    if (context.texcoords) {
         var uvCurr = Vector.set(uA);
         var uv_delta = Vector.div(Vector.sub(uB,uA), numTriangles);
     }
 
     //  Add the FIRST and CENTER vertex
     //  The triangles will be composed in a FAN style around it
-    addVertex(coord, nC, uC, constants);
+    addVertex(coord, nC, uC, context);
 
     //  Add first corner
-    addVertex(coord, normCurr, uA, constants);
+    addVertex(coord, normCurr, uA, context);
 
     // Iterate through the rest of the corners
     for (var t = 0; t < numTriangles; t++) {
         normPrev = Vector.normalize(normCurr);
-        normCurr = Vector.rot( Vector.normalize(normCurr), angle_delta);     //  Rotate the extrusion normal
-
-        if (numTriangles === 4 && (t === 0 || t === numTriangles - 2)) {
-            var scale = 2 / (1 + Math.abs(Vector.dot(normPrev, normCurr)));
-            normCurr = Vector.mult(normCurr, scale*scale);
-        }
-
-        if (constants.texcoords) {
+        normCurr = Vector.rot(Vector.normalize(normCurr), angle_step);     //  Rotate the extrusion normal
+        if (context.texcoords) {
             uvCurr = Vector.add(uvCurr,uv_delta);
         }
-
-        addVertex(coord, normCurr, uvCurr, constants);      //  Add computed corner
+        addVertex(coord, normCurr, uvCurr, context);      //  Add computed corner
     }
 
+    // Index the vertices
     for (var i = 0; i < numTriangles; i++) {
         if (signed) {
-            addIndex(i+2, constants);
-            addIndex(0, constants);
-            addIndex(i+1, constants);
+            addIndex(i+2, context);
+            addIndex(0, context);
+            addIndex(i+1, context);
         } else {
-            addIndex(i+1, constants);
-            addIndex(0, constants);
-            addIndex(i+2, constants);
+            addIndex(i+1, context);
+            addIndex(0, context);
+            addIndex(i+2, context);
         }
     }
 
     // Clear the buffer
-    constants.vertices = [];
-    if (constants.scalingVecs) {
-        constants.scalingVecs = [];
+    context.vertices = [];
+    if (context.scalingVecs) {
+        context.scalingVecs = [];
     }
-    if (constants.texcoords) {
-        constants.texcoords = [];
+    if (context.texcoords) {
+        context.texcoords = [];
+    }
+}
+
+//  addBevel    A ----- B
+//             / \ , . / \
+//           /   /\   /\  \
+//              /  \ /   \ \
+//                / C \
+function addBevel (coord, nA, nC, nB, uA, uC, uB, signed, context) {
+    // Add previous vertices to buffer and clear the buffers and index pairs
+    // because we are going to add more triangles.
+    indexPairs(context);
+
+    //  Add the FIRST and CENTER vertex
+    addVertex(coord, nC, uC, context);
+    addVertex(coord, nA, uA, context);
+    addVertex(coord, nB, uB, context);
+
+    if (signed) {
+        addIndex(2, context);
+        addIndex(0, context);
+        addIndex(1, context);
+    } else {
+        addIndex(1, context);
+        addIndex(0, context);
+        addIndex(2, context);
+    }
+
+    // Clear the buffer
+    context.vertices = [];
+    if (context.scalingVecs) {
+        context.scalingVecs = [];
+    }
+    if (context.texcoords) {
+        context.texcoords = [];
+    }
+}
+
+
+//  Tessalate a SQUARE geometry between A and B     + ........+
+//  and interpolating their UVs                     : \  2  / :
+//                                                  : 1\   /3 :
+//                                                  A -- C -- B
+function addSquare (coord, nA, nB, uA, uC, uB, signed, context) {
+
+    // Add previous vertices to buffer and clear the buffers and index pairs
+    // because we are going to add more triangles.
+    indexPairs(context);
+
+    // Initial parameters
+    var normCurr = Vector.set(nA);
+    var normPrev = [0,0];
+    if (context.texcoords) {
+        var uvCurr = Vector.set(uA);
+        var uv_delta = Vector.div(Vector.sub(uB,uA), 4);
+    }
+
+    // First and last cap have different directions
+    var angle_step = 0.78539816339; // PI/4 = 45 degrees
+    if (!signed) {
+        angle_step *= -1;
+    }
+
+    //  Add the FIRST and CENTER vertex
+    //  The triangles will be add in a FAN style around it
+    //
+    //                       A -- C
+    addVertex(coord, zero_vec2, uC, context);
+
+    //  Add first corner     +
+    //                       :
+    //                       A -- C
+    addVertex(coord, normCurr, uA, context);
+
+    // Iterate through the rest of the coorners completing the triangles
+    // (except the corner 1 to save one triangle to be draw )
+    for (var t = 0; t < 4; t++) {
+
+        // 0     1     2
+        //  + ........+
+        //  : \     / :
+        //  :  \   /  :
+        //  A -- C -- B  3
+
+        normPrev = Vector.normalize(normCurr);
+        normCurr = Vector.rot( Vector.normalize(normCurr), angle_step);     //  Rotate the extrusion normal
+
+        if (t === 0 || t === 2) {
+            // In order to make this "fan" look like a square the mitters need to be streach
+            var scale = 2 / (1 + Math.abs(Vector.dot(normPrev, normCurr)));
+            normCurr = Vector.mult(normCurr, scale*scale);
+        }
+
+        if (context.texcoords) {
+            uvCurr = Vector.add(uvCurr,uv_delta);
+        }
+
+        if (t !== 1) {
+            //  Add computed corner (except the corner 1)
+            addVertex(coord, normCurr, uvCurr, context);
+        }
+    }
+
+    for (var i = 0; i < 3; i++) {
+        if (signed) {
+            addIndex(i+2, context);
+            addIndex(0, context);
+            addIndex(i+1, context);
+        } else {
+            addIndex(i+1, context);
+            addIndex(0, context);
+            addIndex(i+2, context);
+        }
+    }
+
+    // Clear the buffer
+    context.vertices = [];
+    if (context.scalingVecs) {
+        context.scalingVecs = [];
+    }
+    if (context.texcoords) {
+        context.texcoords = [];
     }
 }
 
 //  Add special joins (not miter) types that require FAN tessellations
 //  Using http://www.codeproject.com/Articles/226569/Drawing-polylines-by-tessellation as reference
-function addJoin (coords, normals, v_pct, nTriangles, constants) {
-
-    var T = [Vector.set(normals[0]), Vector.set(normals[1]), Vector.set(normals[2])];
+function addJoin (coords, normals, nTriangles, context) {
     var signed = Vector.signed_area(coords[0], coords[1], coords[2]) > 0;
+    var nA = normals[0],              // normal to point A (aT)
+        nC = Vector.neg(normals[1]),  // normal to center (-vP)
+        nB = normals[2];              // normal to point B (bT)
+    var uA, uB, uC;
 
-    var nA = T[0],              // normal to point A (aT)
-        nC = Vector.neg(T[1]),  // normal to center (-vP)
-        nB = T[2];              // normal to point B (bT)
-
-    if (constants.texcoords) {
-        var uA = [constants.max_u, (1-v_pct)*constants.min_v + v_pct*constants.max_v],
-            uC = [constants.min_u, (1-v_pct)*constants.min_v + v_pct*constants.max_v],
-            uB = [constants.max_u, (1-v_pct)*constants.min_v + v_pct*constants.max_v];
+    if (context.texcoords) {
+        context.total_dist += Vector.length(Vector.sub(coords[1], coords[0])) * context.v_scale;
+        uA = [context.max_u, context.total_dist];
+        uC = [context.min_u, context.total_dist];
+        uB = uA;
     }
 
     if (signed) {
-        addVertex(coords[1], nA, uA, constants);
-        addVertex(coords[1], nC, uC, constants);
+        addVertex(coords[1], nA, uA, context);
+        addVertex(coords[1], nC, uC, context);
     } else {
-        nA = Vector.neg(T[0]);
-        nC = T[1];
-        nB = Vector.neg(T[2]);
+        nA = Vector.neg(normals[0]);
+        nC = normals[1];
+        nB = Vector.neg(normals[2]);
 
-        if (constants.texcoords) {
-            uA = [constants.min_u, (1-v_pct)*constants.min_v + v_pct*constants.max_v];
-            uC = [constants.max_u, (1-v_pct)*constants.min_v + v_pct*constants.max_v];
-            uB = [constants.min_u, (1-v_pct)*constants.min_v + v_pct*constants.max_v];
+        if (context.texcoords) {
+            uA = [context.min_u, context.total_dist];
+            uC = [context.max_u, context.total_dist];
+            uB = uA;
         }
-        addVertex(coords[1], nC, uC, constants);
-        addVertex(coords[1], nA, uA, constants);
+        addVertex(coords[1], nC, uC, context);
+        addVertex(coords[1], nA, uA, context);
     }
 
-    addFan(coords[1], nA, nC, nB, uA, uC, uB, signed, nTriangles, constants);
+    if (nTriangles === 1) {
+        addBevel(coords[1], nA, nC, nB, uA, uC, uB, signed, context);
+    } else if (nTriangles > 1){
+        addFan(coords[1], nA, nC, nB, uA, uC, uB, signed, nTriangles, context);
+    }
 
     if (signed) {
-        addVertex(coords[1], nB, uB, constants);
-        addVertex(coords[1], nC, uC, constants);
+        addVertex(coords[1], nB, uB, context);
+        addVertex(coords[1], nC, uC, context);
     } else {
-        addVertex(coords[1], nC, uC, constants);
-        addVertex(coords[1], nB, uB, constants);
+        addVertex(coords[1], nC, uC, context);
+        addVertex(coords[1], nB, uB, context);
     }
 }
 
 //  Function to add the vertex need for line caps,
 //  because re-use the buffers needs to be at the end
-function addCap (coord, normal, numCorners, isBeginning, constants) {
+function addCap (coord, normal, numCorners, isBeginning, context) {
 
     if (numCorners < 1) {
         return;
@@ -522,27 +712,30 @@ function addCap (coord, normal, numCorners, isBeginning, constants) {
 
     // UVs
     var uvA, uvB, uvC;
-    if (constants.texcoords) {
-        if (isBeginning) {
-            uvA = [constants.min_u,constants.min_v];                                        // Beginning angle UVs
-            uvC = [constants.min_u+(constants.max_u-constants.min_u)/2, constants.min_v];   // Center point UVs
-            uvB = [constants.max_u,constants.min_v];                                        // Ending angle UVs
-        }
-        else {
-            uvA = [constants.min_u,constants.max_v];                                        // Begining angle UVs
-            uvC = [constants.min_u+(constants.max_u-constants.min_u)/2, constants.max_v];   // Center point UVs
-            uvB = [constants.max_u,constants.max_v];                                        // Ending angle UVs
-        }
+    if (context.texcoords) {
+        uvC = [context.min_u+(context.max_u-context.min_u)/2, context.total_dist];   // Center point UVs
+        uvA = [context.min_u, context.total_dist];                                   // Beginning angle UVs
+        uvB = [context.max_u, context.total_dist];                                   // Ending angle UVs
     }
 
-    addFan(coord,
-           Vector.neg(normal), [0, 0], normal,
-           uvA, uvC, uvB,
-           isBeginning, numCorners*2, constants);
+    if ( numCorners === 2 ){
+        // If caps are set as squares
+        addSquare( coord,
+                   Vector.neg(normal), normal,
+                   uvA, uvC, uvB,
+                   isBeginning,
+                   context);
+    } else {
+        // If caps are set as round ( numCorners===3 )
+        addFan( coord,
+                Vector.neg(normal), zero_vec2, normal,
+                uvA, uvC, uvB,
+                isBeginning, numCorners*2, context);
+    }
 }
 
 // Add a vertex based on the index position into the VBO (internal method for polyline builder)
-function addIndex (index, { vertex_data, vertex_template, halfWidth, vertices, scaling_index, scaling_normalize, scalingVecs, texcoord_index, texcoords, texcoord_normalize }) {
+function addIndex (index, { vertex_data, vertex_template, half_width, vertices, scaling_index, scaling_normalize, scalingVecs, texcoord_index, texcoords, texcoord_normalize }) {
     // Prevent access to undefined vertices
     if (index >= vertices.length) {
         return;
@@ -558,11 +751,11 @@ function addIndex (index, { vertex_data, vertex_template, halfWidth, vertices, s
         vertex_template[texcoord_index + 1] = texcoords[index][1] * texcoord_normalize;
     }
 
-    // set Scaling vertex (X, Y normal direction + Z halfwidth as attribute)
+    // set Scaling vertex (X, Y normal direction + Z half_width as attribute)
     if (scaling_index) {
         vertex_template[scaling_index + 0] = scalingVecs[index][0] * scaling_normalize;
         vertex_template[scaling_index + 1] = scalingVecs[index][1] * scaling_normalize;
-        vertex_template[scaling_index + 2] = halfWidth;
+        vertex_template[scaling_index + 2] = half_width;
     }
 
     //  Add vertex to VBO
@@ -570,27 +763,27 @@ function addIndex (index, { vertex_data, vertex_template, halfWidth, vertices, s
 }
 
 // Add the index vertex to the VBO and clean the buffers
-function indexPairs (constants) {
+function indexPairs (context) {
     // Add vertices to buffer acording their index
-    for (var i = 0; i < constants.nPairs; i++) {
-        addIndex(2*i+2, constants);
-        addIndex(2*i+1, constants);
-        addIndex(2*i+0, constants);
+    for (var i = 0; i < context.num_pairs; i++) {
+        addIndex(2*i+2, context);
+        addIndex(2*i+1, context);
+        addIndex(2*i+0, context);
 
-        addIndex(2*i+2, constants);
-        addIndex(2*i+3, constants);
-        addIndex(2*i+1, constants);
+        addIndex(2*i+2, context);
+        addIndex(2*i+3, context);
+        addIndex(2*i+1, context);
     }
 
-    constants.nPairs = 0;
+    context.num_pairs = 0;
 
     // Clean the buffer
-    constants.vertices = [];
-    if (constants.scalingVecs) {
-        constants.scalingVecs = [];
+    context.vertices = [];
+    if (context.scalingVecs) {
+        context.scalingVecs = [];
     }
-    if (constants.texcoords) {
-        constants.texcoords = [];
+    if (context.texcoords) {
+        context.texcoords = [];
     }
 }
 
@@ -616,7 +809,7 @@ Builders.buildQuadsForPoints = function (points, vertex_data, vertex_template,
     if (texcoord_index) {
         texcoord_normalize = texcoord_normalize || 1;
 
-        var [min_u, min_v, max_u, max_v] = texcoord_scale || Builders.defaultUVs;
+        var [min_u, min_v, max_u, max_v] = texcoord_scale || default_uvs;
         texcoords = [
             [min_u, min_v],
             [max_u, min_v],
@@ -665,32 +858,19 @@ Builders.triangulatePolygon = function (contours)
     return earcut(contours);
 };
 
-// Tests if a line segment (from point A to B) is nearly coincident with the edge of a tile
-Builders.isOnTileEdge = function (pa, pb, options) {
-    options = options || {};
+// Tests if a line segment (from point A to B) is outside the tile bounds
+// (within a certain tolerance to account for geometry nearly on tile edges)
+Builders.outsideTile = function (_a, _b, tolerance) {
+    let tile_min = Builders.tile_bounds[0];
+    let tile_max = Builders.tile_bounds[1];
 
-    var tolerance_function = options.tolerance_function || Builders.valuesWithinTolerance;
-    var tolerance = options.tolerance || 1;
-    var tile_min = Builders.tile_bounds[0];
-    var tile_max = Builders.tile_bounds[1];
-    var edge = null;
+    // TODO: fix flipped Y coords here, confusing with 'max' reference
+    if ((_a[0] <= tile_min.x + tolerance && _b[0] <= tile_min.x + tolerance) ||
+        (_a[0] >= tile_max.x - tolerance && _b[0] >= tile_max.x - tolerance) ||
+        (_a[1] >= tile_min.y - tolerance && _b[1] >= tile_min.y - tolerance) ||
+        (_a[1] <= tile_max.y + tolerance && _b[1] <= tile_max.y + tolerance)) {
+        return true;
+    }
 
-    if (tolerance_function(pa[0], tile_min.x, tolerance) && tolerance_function(pb[0], tile_min.x, tolerance)) {
-        edge = 'left';
-    }
-    else if (tolerance_function(pa[0], tile_max.x, tolerance) && tolerance_function(pb[0], tile_max.x, tolerance)) {
-        edge = 'right';
-    }
-    else if (tolerance_function(pa[1], tile_min.y, tolerance) && tolerance_function(pb[1], tile_min.y, tolerance)) {
-        edge = 'top';
-    }
-    else if (tolerance_function(pa[1], tile_max.y, tolerance) && tolerance_function(pb[1], tile_max.y, tolerance)) {
-        edge = 'bottom';
-    }
-    return edge;
-};
-
-Builders.valuesWithinTolerance = function (a, b, tolerance) {
-    tolerance = tolerance || 1;
-    return (Math.abs(a - b) < tolerance);
+    return false;
 };

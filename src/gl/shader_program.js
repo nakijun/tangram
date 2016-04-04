@@ -146,12 +146,20 @@ export default class ShaderProgram {
         // This is done *after* code injection so that we can add defines for which code points were injected
         let info = (this.name ? (this.name + ' / id ' + this.id) : ('id ' + this.id));
         let header = `// Program: ${info}\n`;
-        let precision = '#ifdef GL_ES\nprecision highp float;\n#endif\n\n';
+        let precision = '';
+        let high = this.gl.getShaderPrecisionFormat(this.gl.FRAGMENT_SHADER, this.gl.HIGH_FLOAT);
+        if (high && high.precision > 0) {
+            precision = 'precision highp float;\n';
+        }
+        else {
+            precision = 'precision mediump float;\n';
+        }
 
         defines['TANGRAM_VERTEX_SHADER'] = true;
         defines['TANGRAM_FRAGMENT_SHADER'] = false;
         this.computed_vertex_source =
             header +
+            precision +
             ShaderProgram.buildDefineString(defines) +
             this.computed_vertex_source;
 
@@ -277,7 +285,7 @@ export default class ShaderProgram {
             inject = null;
 
             // Check vertex shader
-            if (!GLSL.isUniformDefined(name, vs) && GLSL.isSymbolReferenced(name, vs)) {
+            if (!GLSL.isUniformDefined(name, vs)) {
                 if (!inject) {
                     inject = GLSL.defineUniform(name, uniforms[name]);
                 }
@@ -286,7 +294,7 @@ export default class ShaderProgram {
 
             }
             // Check fragment shader
-            if (!GLSL.isUniformDefined(name, fs) && GLSL.isSymbolReferenced(name, fs)) {
+            if (!GLSL.isUniformDefined(name, fs)) {
                 if (!inject) {
                     inject = GLSL.defineUniform(name, uniforms[name]);
                 }
@@ -367,8 +375,8 @@ export default class ShaderProgram {
     setTextureUniform(uniform_name, texture_name) {
         var texture = Texture.textures[texture_name];
         if (texture == null) {
-            texture = new Texture(this.gl, texture_name);
-            texture.load(texture_name);
+            log.warn(`Can't find texture '${texture_name}'`);
+            return;
         }
 
         texture.bind(this.texture_unit);

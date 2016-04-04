@@ -1,7 +1,8 @@
 uniform vec2 u_resolution;
 uniform float u_time;
 uniform vec3 u_map_position;
-uniform vec3 u_tile_origin;
+uniform vec4 u_tile_origin;
+uniform float u_tile_proxy_depth;
 uniform float u_meters_per_pixel;
 uniform float u_device_pixel_ratio;
 
@@ -25,6 +26,7 @@ varying vec4 v_world_position;
 #pragma tangram: camera
 #pragma tangram: material
 #pragma tangram: lighting
+#pragma tangram: raster
 #pragma tangram: global
 
 vec2 rotate2D(vec2 _st, float _angle) {
@@ -63,7 +65,8 @@ void main() {
     cameraProjection(position);
 
     #ifdef TANGRAM_LAYER_ORDER
-        applyLayerOrder(SHORT(a_position.w), position);
+        // +1 is to keep all layers including proxies > 0
+        applyLayerOrder(SHORT(a_position.w) + u_tile_proxy_depth + 1., position);
     #endif
 
     // Apply pixel offset in screen-space

@@ -94,9 +94,9 @@ function extendLeaflet(options) {
 
                     this._updating_tangram = true;
                     var view = map.getCenter();
-                    view.zoom = Math.min(map.getZoom(), map.getMaxZoom() || Geo.default_max_zoom);
+                    view.zoom = Math.min(map.getZoom(), map.getMaxZoom() || Geo.default_view_max_zoom);
 
-                    this.scene.setView(view);
+                    this.scene.view.setView(view);
                     this.scene.immediateRedraw();
                     this.reverseTransform();
                     this._updating_tangram = false;
@@ -109,18 +109,18 @@ function extendLeaflet(options) {
                     }
 
                     this._updating_tangram = true;
-                    this.scene.startZoom();
+                    this.scene.view.startZoom();
                     this._updating_tangram = false;
                 };
                 map.on('zoomstart', this.hooks.zoomstart);
 
                 this.hooks.dragstart = () => {
-                    this.scene.panning = true;
+                    this.scene.view.panning = true;
                 };
                 map.on('dragstart', this.hooks.dragstart);
 
                 this.hooks.dragend = () => {
-                    this.scene.panning = false;
+                    this.scene.view.panning = false;
                 };
                 map.on('dragend', this.hooks.dragend);
 
@@ -129,6 +129,10 @@ function extendLeaflet(options) {
 
                 // Modify default leaflet scroll wheel behavior
                 this.modifyScrollWheelBehavior(map);
+
+                // Setup feature selection
+                this.setupSelectionEventHandlers(map);
+                this.setSelectionEvents(this.options.events);
 
                 // Add GL canvas to layer container
                 this.scene.container = this.getContainer();
@@ -165,6 +169,9 @@ function extendLeaflet(options) {
                 map.off('zoomstart', this.hooks.zoomstart);
                 map.off('dragstart', this.hooks.dragstart);
                 map.off('dragend', this.hooks.dragend);
+                map.off('click', this.hooks.click);
+                map.off('mousemove', this.hooks.mousemove);
+                map.off('mouseout', this.hooks.mouseout);
                 this.hooks = {};
 
                 if (this.scene) {
@@ -204,7 +211,7 @@ function extendLeaflet(options) {
             // Note: this should be deprecated once leaflet continuous zoom is more widely used and the
             // default behavior is presumably improved
             modifyScrollWheelBehavior: function (map) {
-                if (this.scene.continuous_zoom && map.scrollWheelZoom && this.options.modifyScrollWheel !== false) {
+                if (this.scene.view.continuous_zoom && map.scrollWheelZoom && this.options.modifyScrollWheel !== false) {
                     let layer = this;
                     let enabled = map.scrollWheelZoom.enabled();
                     if (enabled) {
@@ -256,8 +263,8 @@ function extendLeaflet(options) {
 
             updateView: function () {
                 var view = this._map.getCenter();
-                view.zoom = Math.min(this._map.getZoom(), this._map.getMaxZoom() || Geo.default_max_zoom);
-                this.scene.setView(view);
+                view.zoom = Math.min(this._map.getZoom(), this._map.getMaxZoom() || Geo.default_view_max_zoom);
+                this.scene.view.setView(view);
             },
 
             updateSize: function () {
@@ -270,7 +277,7 @@ function extendLeaflet(options) {
                     return;
                 }
                 this._updating_tangram = true;
-                this._map.setView([this.scene.center.lat, this.scene.center.lng], this.scene.zoom, { animate: false });
+                this._map.setView([this.scene.view.center.lat, this.scene.view.center.lng], this.scene.view.zoom, { animate: false });
                 this.reverseTransform();
                 this._updating_tangram = false;
             },
@@ -291,6 +298,48 @@ function extendLeaflet(options) {
 
                 var top_left = this._map.containerPointToLayerPoint([0, 0]);
                 L.DomUtil.setPosition(this.scene.container, top_left);
+            },
+
+            // Tie Leaflet event handlers to Tangram feature selection
+            setupSelectionEventHandlers: function (map) {
+                this._selection_events = {};
+
+                this.hooks.click = (event) => {
+                    if (typeof this._selection_events.click === 'function') {
+                        this.scene.getFeatureAt(event.containerPoint).
+                            then(selection => {
+                                let results = Object.assign({}, selection, { leaflet_event: event });
+                                this._selection_events.click(results);
+                            });
+                    }
+                };
+                map.on('click', this.hooks.click);
+
+                this.hooks.mousemove = (event) => {
+                    if (typeof this._selection_events.hover === 'function') {
+                        this.scene.getFeatureAt(event.containerPoint).
+                            then(selection => {
+                                let results = Object.assign({}, selection, { leaflet_event: event });
+                                this._selection_events.hover(results);
+                            });
+                    }
+                };
+                map.on('mousemove', this.hooks.mousemove);
+
+                this.hooks.mouseout = (event) => {
+                    // When mouse leaves map, send an additional selection event to indicate no feature is selected
+                    if (typeof this._selection_events.hover === 'function') {
+                        this._selection_events.hover({ changed: true, leaflet_event: event });
+                    }
+                };
+                map.on('mouseout', this.hooks.mouseout);
+            },
+
+            // Set user-defined handlers for feature selection events
+            // Currently only one handler can be defined for each event type
+            // Event types are: `click`, `hover` (leaflet `mousemove`)
+            setSelectionEvents: function (events) {
+                this._selection_events = Object.assign(this._selection_events, events);
             }
 
         });
